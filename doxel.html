@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html>
+    <head>
+        <meta charset="UTF-8" />
+        <title>Doxel Challenge</title>
+
+        <script type="importmap">
+          {
+            "imports": {
+              "three": "https://unpkg.com/three@0.158.0/build/three.module.js",
+              "three/addons/": "https://unpkg.com/three@0.158.0/examples/jsm/"
+            }
+          }
+        </script>
+
+        <style>
+            #root {
+                position: absolute;
+                top: 0;
+                left: 0;
+                width: 100%;
+                height: 100%;
+            }
+        </style>
+    </head>
+    <body>
+        <div id="root"></div>
+
+        <script type="module">
+            import {
+                ACESFilmicToneMapping,
+                AmbientLight,
+                BoxGeometry,
+                Color,
+                ConeGeometry,
+                Euler,
+                Layers,
+                Mesh, 
+                MeshStandardMaterial,
+                PerspectiveCamera, 
+                PointLight,
+                Quaternion,
+                Raycaster,
+                Scene,
+                ShaderMaterial,
+                SphereGeometry,
+                WebGLRenderer,
+                Vector2,
+            } from 'three';
+
+            import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+            import Stats from 'three/addons/libs/stats.module.js';
+            import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+            import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+            import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
+            import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+            import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+            
+            const RAD = Math.PI / 180;
+
+
+            class DoxelChallenge {
+
+                static ROTATION_SPEED = 150;
+                static BLOOM = 1;
+
+                hasRequestedNextFrame = false;
+                target = undefined;
+                mouseStartPosition = new Vector2();
+                targetStartRotation = new Quaternion();
+                resizeObserver = new ResizeObserver(() => this.onResize());
+                raycaster = new Raycaster();
+
+                constructor(parent) {
+                    this.canvas = document.createElement('canvas');
+
+                    this.parent = parent;
+                    this.parent.classList.add('DoxelChallenge');
+                    this.parent.appendChild(this.canvas);
+
+                    this.stats = new Stats();
+                    this.parent.appendChild(this.stats.dom);
+
+                    this.scene = new Scene();
+                    this.scene.background = new Color(0x111111);
+
+                    this.camera = new PerspectiveCamera(45, this.aspect, 6, 15);
+                    this.camera.position.z = 10;
+
+                     this.renderer = new WebGLRenderer({ 
+                        canvas: this.canvas, 
+                        antialias: true,
+                        powerPreference: 'low-power',
+                    });
+                    this.renderer.setSize(this.width, this.height);
+                    this.renderer.setPixelRatio(window.devicePixelRatio);
+                    this.renderer.toneMapping = ACESFilmicToneMapping;
+                    this.renderer.gammaFactor = 2.2;
+
+                    this.controls = new OrbitControls(this.camera, this.renderer.domElement);
+                    this.controls.enablePan = false;
+                    this.controls.enableZoom = false;
+
+                    // Evented methods need bindings
+                    this.nextFrame = this.nextFrame.bind(this);
+                    this.onDoubleClick = this.onDoubleClick.bind(this);
+                    this.onMouseDown = this.onMouseDown.bind(this);
+                    this.onMouseMove = this.onMouseMove.bind(this);
+                    this.onMouseUp = this.onMouseUp.bind(this);
+
+                    this.buildRenderPipeline();
+                    this.buildScene();
+                    this.attachEvents();
+                    this.render();
+                }
+
+                buildRenderPipeline() {
+                    const renderScene = new RenderPass(this.scene, this.camera);
+
+                    // Bloom Glow Effect
+                    this.bloom = new EffectComposer(this.renderer);
+                    this.bloom.renderToScreen = false;
+                    this.bloom.addPass(renderScene);
+                    this.bloom.addPass(new UnrealBloomPass(new Vector2(this.width, this.height), .5, .05, 0));
+
+                    // Mix pass combines the bloom render with a pure render.
+                    const mixPass = new ShaderPass(
+                        new ShaderMaterial({
+                            uniforms: {
+                                baseTexture: { value: null },
+                                bloomTexture: { value: this.bloom.renderTarget2.texture }
+                            },
+                            vertexShader: this.mixPassVertexShader,
+                            fragmentShader: this.mixPassFragmentShader,
+                            defines: {},
+                        }), 'baseTexture'
+                    );
+                    mixPass.needsSwap = true;
+
+                    // Output with bloom mix
+                    this.output = new EffectComposer(this.renderer);
+                    this.output.addPass(renderScene);
+                    this.output.addPass(mixPass);
+                    this.output.addPass(new OutputPass());
+                }
+
+                buildScene() {
+                    this.scene.clear();
+
+                    // Layers
+                    this.bloomLayer = new Layers();
+                    this.bloomLayer.set(DoxelChallenge.BLOOM);
+
+                    // Lighting
+                    const pointLight = new PointLight(0xFFFFFF, 100);
+                    pointLight.position.set(2, 5, 5);
+                    this.scene.add(pointLight);
+                    this.scene.add(new AmbientLight(0xFFFFFF));
+
+                    // Materials
+                    this.basicMaterial = new MeshStandardMaterial({ 
+                        color: 0x55AAFF,
+                    });
+                 
+                    // Geometries
+                    const sphere = new Mesh(new SphereGeometry(.5), this.basicMaterial);
+                    sphere.position.x = -3;
+                    const cube = new Mesh(new BoxGeometry(1, 1, 1), this.basicMaterial);
+                    cube.rotation.y = Math.PI * .2;
+                    cube.rotation.x = Math.PI * .3;
+                    const pyramid = new Mesh(new ConeGeometry(1, 1, 3), this.basicMaterial);
+                    pyramid.position.x = 3;
+
+                    this.scene.add(sphere);
+                    this.scene.add(cube);
+                    this.scene.add(pyramid);
+                }
+
+                get mixPassVertexShader() {
+                    return `
+                        varying vec2 vUv;
+
+                        void main() {
+                            vUv = uv;
+                            gl_Position = projectionMatrix * modelViewMatrix * vec4( position, 1.0 );
+                        }
+                    `;
+                }
+
+                get mixPassFragmentShader() {
+                    return `
+                        uniform sampler2D baseTexture;
+                        uniform sampler2D bloomTexture;
+                        varying vec2 vUv;
+
+                        void main() {
+                            gl_FragColor = (texture2D(baseTexture, vUv) + (vec4(1.0) * texture2D(bloomTexture, vUv)));
+                        }
+                    `;
+                }
+
+                /**
+                * Render
+                */
+
+                render() {
+                    this.preBloom();
+                    this.bloom.render();
+                    this.postBloom();
+
+                    this.output.render();
+                    this.stats.update();
+                }
+
+                nextFrame() {
+                    if (!this.hasRequestedNextFrame) {
+                        this.hasRequestedNextFrame = true;
+                        requestAnimationFrame(() => {
+                            this.render()
+                            this.hasRequestedNextFrame = false;
+                        });
+                    }
+                }
+
+                preBloom() {
+                    this.scene.traverse(obj => {
+                        if (obj.isMesh && !this.bloomLayer.test(obj.layers)) {
+                            obj.visible = false;
+                        }
+                    });
+                }
+
+                postBloom() {
+                    this.scene.traverse(obj => {
+                        if (obj.isMesh) {
+                            obj.visible = true;
+                        }
+                    });
+                }
+
+
+                /**
+                * Events
+                */
+
+                attachEvents() {
+                    this.detachEvents();
+
+                    this.resizeObserver.observe(this.parent);
+                    this.controls.addEventListener('change', this.nextFrame);
+                    this.canvas.addEventListener('mousedown', this.onMouseDown);
+                    this.canvas.addEventListener('dblclick', this.onDoubleClick);
+                }
+
+                detachEvents() {
+                    this.resizeObserver.unobserve(this.parent);
+                    this.controls.removeEventListener('change', this.nextFrame);
+                    this.canvas.removeEventListener('mousedown', this.onMouseDown);
+                    this.canvas.removeEventListener('dblclick', this.onDoubleClick);
+                }
+
+                onResize() {
+                    this.camera.aspect = this.aspect;
+                    this.camera.updateProjectionMatrix();
+
+                    this.renderer.setSize(this.width, this.height);
+                    this.bloom.setSize(this.width, this.height);
+                    this.output.setSize(this.width, this.height);
+
+                    this.render();
+                }
+
+                onDoubleClick(e) {
+                    this.captureMouseTarget(e);
+
+                    if (this.target) {
+                        this.target.object.layers.toggle(DoxelChallenge.BLOOM);
+
+                        this.render();
+                    }
+                }
+
+                onMouseDown(e) {
+                    this.captureMouseTarget(e);
+
+                    if (this.target) {
+                        this.controls.enabled = false;
+                        this.targetStartRotation.copy(this.target.object.quaternion);
+                    }
+                    
+                    window.addEventListener('mousemove', this.onMouseMove);
+                    window.addEventListener('mouseup', this.onMouseUp, { once: true });
+                }
+
+                onMouseMove(e) {
+                    if (this.target) {
+                        const { x, y } = this.normalizePosition(e.x, e.y);
+                        const rotX = (x - this.mouseStartPosition.x) * DoxelChallenge.ROTATION_SPEED * RAD;
+                        const rotY = -(y - this.mouseStartPosition.y) * DoxelChallenge.ROTATION_SPEED * RAD;
+
+                        const rotation = (new Quaternion()).setFromEuler(new Euler(rotY, rotX, 0, 'XYZ'));
+                        this.target.object.quaternion.multiplyQuaternions(rotation, this.targetStartRotation);
+
+                        this.nextFrame();
+                    }
+                }
+
+                onMouseUp() {
+                    this.target = undefined;
+                    this.controls.enabled = true;
+
+                    window.removeEventListener('mousemove', this.onMouseMove);
+                }
+
+                /**
+                * Canvas
+                */
+
+                get height() {
+                    return this.parent.getBoundingClientRect().height;
+                }
+
+                get width() {
+                    return this.parent.getBoundingClientRect().width;
+                }
+
+                get xOffset() {
+                    return this.parent.getBoundingClientRect().x;
+                }
+
+                get yOffset() {
+                    return this.parent.getBoundingClientRect().y;
+                }
+
+                get aspect() {
+                    return this.width / this.height;
+                }
+
+                normalizePosition(x, y) {
+                    return {
+                        x: (((x - this.xOffset) / this.width) * 2) - 1,
+                        y: ((-(y - this.yOffset) / this.height) * 2) + 1,
+                    };
+                }
+
+                captureMouseTarget(e) {
+                    const { x, y } = this.normalizePosition(e.x, e.y);
+                    this.mouseStartPosition.x = x
+                    this.mouseStartPosition.y = y;
+
+                    this.raycaster.setFromCamera(this.mouseStartPosition, this.camera);
+                    this.target = this.raycaster.intersectObjects(this.scene.children)[0];
+                }
+
+            }
+
+            new DoxelChallenge(document.querySelector('#root'));
+        </script>
+    </body>
+</html>
